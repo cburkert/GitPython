@@ -456,6 +456,7 @@ class GitConfigParser(cp.RawConfigParser, metaclass=MetaParserBuilder):
             if not line:
                 break
             lineno = lineno + 1
+            line = line.rstrip("\r\n")  # strip newline chars
             # comment or blank line?
             if line.strip() == '' or self.re_comment.match(line):
                 continue
