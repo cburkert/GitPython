@@ -264,6 +264,8 @@ class GitConfigParser(cp.RawConfigParser, metaclass=MetaParserBuilder):
     # A suitable alternative would be the BlockingLockFile
     t_lock = LockFile
     re_comment = re.compile(r'^\s*[#;]')
+    comment_chars = '#;'
+    escape_char = '\\'  # single backslash
 
     #} END configuration
 
@@ -388,6 +390,41 @@ class GitConfigParser(cp.RawConfigParser, metaclass=MetaParserBuilder):
         """Do not transform options in any way when writing"""
         return optionstr
 
+    def _is_value_continued(self, val: str) -> bool:
+        """Check if the option value will be continued on the next line.
+
+        Note: Git only supports multi-line option values by
+        ending a line with '\'. Continuing a line with opened
+        quotes is not a thing in Git configs.
+        """
+        escaped = False
+        for char in val:
+            if escaped:
+                # consume escape and skip char
+                escaped = False
+                continue
+            if char == self.escape_char:
+                escaped = True
+        # Returns true is last char was unescaped escape char
+        return escaped
+
+    def _find_comment(self, optval: str) -> int:
+        """Find the beginning of a potential comment tailing a option value"""
+        escaped = False
+        quote_open = False
+        for pos, char in enumerate(optval):
+            if escaped:
+                # consume escape and skip char
+                escaped = False
+                continue
+            if char == self.escape_char:
+                escaped = True
+            if char == '"' and not escaped:
+                quote_open = not quote_open
+            if char in self.comment_chars and not quote_open:
+                return pos
+        return -1  # not found
+
     def _read(self, fp: Union[BufferedReader, IO[bytes]], fpname: str) -> None:
         """A direct copy of the py2.4 version of the super class's _read method
         to assure it uses ordered dicts. Had to change one line to make it work.
@@ -447,20 +484,21 @@ class GitConfigParser(cp.RawConfigParser, metaclass=MetaParserBuilder):
             elif not is_multi_line:
                 mo = self.OPTCRE.match(line)
                 if mo:
-                    # We might just have handled the last line, which could contain a quotation we want to remove
+                    # Remove end-of-line comments if not inside double quotes
                     optname, vi, optval = mo.group('option', 'vi', 'value')
-                    if vi in ('=', ':') and ';' in optval and not optval.strip().startswith('"'):
-                        pos = optval.find(';')
-                        if pos != -1 and optval[pos - 1].isspace():
-                            optval = optval[:pos]
+                    if vi in ('=', ':'):
+                        comment_pos = self._find_comment(optval)
+                        if comment_pos != -1:
+                            # removed end-of-line comment
+                            optval = optval[:comment_pos]
                     optval = optval.strip()
                     if optval == '""':
                         optval = ''
                     # end handle empty string
                     optname = self.optionxform(optname.rstrip())
-                    if len(optval) > 1 and optval[0] == '"' and optval[-1] != '"':
+                    if len(optval) > 1 and self._is_value_continued(optval):
                         is_multi_line = True
-                        optval = string_decode(optval[1:])
+                        optval = string_decode(optval[:-1])
                     # end handle multi-line
                     # preserves multiple values for duplicate optnames
                     cursect.add(optname, optval)
@@ -472,11 +510,10 @@ class GitConfigParser(cp.RawConfigParser, metaclass=MetaParserBuilder):
                         e.append(lineno, repr(line))
                     continue
             else:
-                line = line.rstrip()
-                if line.endswith('"'):
-                    is_multi_line = False
+                if self._is_value_continued(line):
                     line = line[:-1]
-                # end handle quotations
+                else:
+                    is_multi_line = False
                 optval = cursect.getlast(optname)
                 cursect.setlast(optname, optval + string_decode(line))
             # END parse section or option
